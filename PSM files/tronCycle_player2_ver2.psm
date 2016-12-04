@@ -1,0 +1,276 @@
+; ============================================
+; === Register Names                       ===
+; === s5 - s0 registers are not dedicated  ===
+; === and keep their default names         ===
+; ============================================
+
+NAMEREG		s6,		Movement	    ; Register for Movement indicator (forward/halt)
+NAMEREG		s7,		Orientation     ; Register for Orientation
+NAMEREG		s8,     Loc_X		    ; Register for X location
+NAMEREG		s9,     Loc_Y		    ; Register for Y location
+NAMEREG		sA,		Pushbuttons		; Register for pushbutton inputs
+
+									; Dig7, Dig6, Dig5 and Dig4 are stored in the scratchpad
+									; RAM to keep the changes to minimum
+NAMEREG		sB,		Dig4			; 7-segment display digit 0
+NAMEREG		sC,		Dig5			; 7-segment display digit 1
+NAMEREG		sD,		Dig6			; 7-segment display digit 2
+NAMEREG		sE,		Dig7			; 7-segment display digit 3
+NAMEREG		sF,		DP_UPPER		; Register for Lower Decimal Points
+
+
+
+; ======================
+; === Port Addresses ===
+; ======================
+
+; Nexys 4 board base I/O interface ports compatib le with the Nexys3 I/O interface
+;  Port Addresses
+
+CONSTANT	PA_LOCX,		06		; (o) X coordinate of rojobot location
+CONSTANT	PA_LOCY,		07		; (o) Y coordinate of rojobot location
+CONSTANT	PA_Orientation,	08		; (o) indicates the Orientation of the icon
+CONSTANT    PA_PBBTNS,      09      ; (i) pushbutton
+CONSTANT	PA_HALT,		0A		; (i/o) halt 
+
+ 
+; Extended I/O interface port addresses for the Nexys4.  Your Nexys4_Bot interface module
+; should include these additional ports even though they are not used in this program
+CONSTANT	PA_LEDS1508,	12		; (o) LEDs 15:8 (high byte of switches)
+CONSTANT	PA_DIG7,		13		; (o) digit 7 port address
+CONSTANT	PA_DIG6,		14		; (o) digit 6 port address
+CONSTANT	PA_DIG5,		15		; (o) digit 5 port address
+CONSTANT	PA_DIG4,		16		; (o) digit 4 port address
+CONSTANT	PA_DP0704,		17		; (o) decimal points 7:4 port address
+
+; =============================================
+; === CONSTANTS FOR ORIENTATION AND MOVEMENT===
+; =============================================
+CONSTANT	OR_N,			00		; Orientation is North
+CONSTANT	OR_E,			01		; Orientation is East
+CONSTANT	OR_S,			02		; Orientation is South
+CONSTANT	OR_W,			03		; Orientation is West
+
+CONSTANT	MV_STOP,		00		; Movement is stopped
+CONSTANT	MV_FWD,			01		; Movement is forward
+
+; =================================
+; === MASKS USED IN THE CODE ===
+; =================================
+CONSTANT	MSK_HALT,		01		; 0th bit is used to save halt signal - rest of the bits are reserved
+CONSTANT	MSK_BTN_CENTER,	10		; Pushbutton Center is bit 4
+CONSTANT	MSK_BTN_LEFT,	08		; Pushbutton Left is bit 3
+CONSTANT	MSK_BTN_UP,		04		; Pushbutton Up is bit 2
+CONSTANT	MSK_BTN_RIGHT,	02		; Pushbutton Right is bit 1
+CONSTANT	MSK_BTN_DOWN,	01		; Pushbutton Down is bit 0
+CONSTANT	MSK_BTN_LEFT_UP,30	; Pushbutton Right and Down pressed
+CONSTANT	MSK_LOWER_NIBBLE,0F		; Mask for Lower Nibble in a byte
+CONSTANT	MSK_HIGHER_NIBBLE,F0	; Mask for Higher Nibble in a byte
+
+
+; =================================
+; === Storage of Old values ===
+; =================================
+
+CONSTANT	SP_SEM,			20		;
+CONSTANT	SP_GAME_START,	21		;
+CONSTANT	SP_HALT,		22
+
+
+; ===============
+; === main()  ===
+; ===============
+ 
+
+ADDRESS	000
+				JUMP	main						; workaround to avoid location 3 corruption
+				JUMP	main						; by Vivado Hardware Manager.  Bug was flagged by
+				JUMP	main						; Ken Chapman and is known to be in 2014.2
+				JUMP	main						; Address 003 can be corrupted by Vivado HW manager
+													;
+main:			LOAD	Loc_X,		7C				; Starting location of Player 1 -  X 
+				LOAD	Loc_Y,		74				; Starting location of Player 1 -  Y
+				LOAD 	Movement,	00				; Clearing Movement Register
+				LOAD	Orientation,03				; Initial Orientation of Player 1 is East
+				LOAD	DP_UPPER,	00					
+				LOAD	s1,		00
+				STORE	s1,		SP_GAME_START		; Clear game start bit; If '1', indicates that the game has begun
+				LOAD	s1,		00					; clear the semaphore
+				STORE	s1,		SP_SEM				;
+				ENABLE	INTERRUPT					; get the ball rolling
+				
+; ==================
+; === Main  Loop ===
+; ==================
+													;	while(1) {  // main loop is an infinite loop
+main_L0:		FETCH	s5,		SP_SEM				;		while (SP_SEMA == 0)  {}   // loop until isr updates rojobot registers
+				COMPARE	s5,		00					;
+				JUMP	Z,		main_L0				;
+													;		}
+main_L2:		CALL	fsm_movement				;	routine for describing fsm
+				OUTPUT	Loc_X,	PA_LOCX				; 	Output present X Co-ordinate location of the player
+				OUTPUT	Loc_Y,	PA_LOCY				;	Output present Y Co-ordinate location of the player
+				CALL 	display_seven_segment		
+				
+				
+				
+				FETCH	s5,		SP_SEM       		;
+				SUB		s5,		01						;	decrement semaphore
+				STORE	s5,		SP_SEM				;
+				JUMP	main_L0						;	} // end - main while loop	
+				
+
+				
+;**************************************************************************************
+; Support functions
+;**************************************************************************************	
+
+; ===============================================================================
+; === fsm_movement () - implements the state machine logic for the game =========
+; ===============================================================================
+fsm_movement:	INPUT		Pushbuttons,PA_PBBTNS		;	Input values from Pushbuttons
+				INPUT		s1,		PA_HALT
+				AND			s1,		MSK_HALT
+				COMPARE		s1,		MSK_HALT			;	Check if halt = 1
+				JUMP		NZ,		check_game_start	
+halt_movement:	LOAD		Movement,MV_STOP			;	Clear the Forward Movement bit in the Movement register
+				LOAD		s1,		01
+				STORE		s1,		SP_HALT				; 	Flag to continue halting the game
+				LOAD		s1,		AA					;
+				OUTPUT		s1,		PA_LEDS1508			;
+				LOAD		s1,		01
+				OUTPUT		s1,		PA_HALT				; Halt the game
+				RETURN
+				
+check_game_start:FETCH		s1,		SP_HALT
+				COMPARE		s1,		01
+				JUMP		Z,		return_now
+				FETCH		s1,		SP_GAME_START		; 	fetching the game start bit
+				COMPARE		s1,		01					; 	If the GAME START bit is one, the game has begun
+				JUMP		Z,		check_inputs		;	If game has begun, check for left and right buttons
+				LOAD		s1,		Pushbuttons
+				AND			s1,		MSK_BTN_CENTER		;	Checking for game start signal
+				COMPARE		s1,		MSK_BTN_CENTER		; 	Checking if the game has started
+				RETURN		NZ							; 	Return to main loop if game has not been started
+				LOAD		s1,		01
+				STORE		s1,		SP_GAME_START		;	Start the Game
+				LOAD		Movement,MV_FWD				;	The bike starts to move
+				JUMP		forward_movement			;	Start forward movement
+check_inputs:	LOAD		s1,		Pushbuttons			;	Load input values from Down and Right Buttons: Down -> Left turn, Right -> Right turn
+				AND			s1,		MSK_BTN_LEFT_UP	;   Check if both input buttons are pressed
+				COMPARE		s1,		MSK_BTN_LEFT_UP	;	Bike to continue forward movement if both  inputs pressed
+				RETURN		Z							;	Return to main loop with movement register updated
+check_right_turn:LOAD		s1,		Pushbuttons
+				AND			s1,		MSK_BTN_LEFT		
+				COMPARE		s1,		MSK_BTN_LEFT		;	Check if right button is pressed
+				JUMP		NZ,		check_left_turn
+				LOAD		s1,		Orientation			;	Right turn button pressed
+				COMPARE		s1,		03
+				JUMP		NZ,		increment_orientation; 
+				LOAD		Orientation,00				;	turning from west to north (03 to 00)
+				JUMP		go_right
+increment_orientation:ADD	Orientation,	01			; 	turning by 90 deg to the right
+go_right:		OUTPUT		Orientation,	PA_Orientation
+				RETURN
+				
+check_left_turn:LOAD		s1,		Pushbuttons
+				AND			s1,		MSK_BTN_UP		
+				COMPARE		s1,		MSK_BTN_UP		; 	Check if Left button is pressed
+				JUMP		NZ,		forward_movement
+				LOAD		s1,		Orientation			;	Left turn button pressed
+				COMPARE		s1,		00
+				JUMP		NZ,		decrement_orientation
+				LOAD		Orientation,03				;	turning from north to west (00 to 03)
+				JUMP		go_left
+decrement_orientation:SUB	Orientation,	01			; 	turning by 90 deg to the left
+go_left:		OUTPUT		Orientation,	PA_Orientation
+				RETURN
+				
+forward_movement:LOAD		s1,		Movement
+				COMPARE		s1,		01					; Check if forward movement reg is set
+				RETURN		NZ
+				LOAD		s1,		Orientation			; Check for Present Orientation and move forward in the present direction
+check_north_direction:COMPARE		s1,	OR_N				
+				JUMP		NZ,		check_east_direction
+				COMPARE		Loc_Y,	01
+				JUMP		NZ,		subtract_location_Y
+				JUMP		halt_movement
+subtract_location_Y:SUB		Loc_Y,	01					;	X = X. Y = Y - 1
+				RETURN
+check_east_direction:COMPARE		s1,	OR_E
+				JUMP		NZ,		check_south_direction
+				COMPARE		Loc_X,	7E
+				JUMP		NZ,		add_location_X
+				JUMP		halt_movement
+add_location_X:	ADD			Loc_X,	01					;	X = X + 1. Y = Y
+				RETURN
+check_south_direction:COMPARE		s1,	OR_S
+				JUMP		NZ,		check_west_direction
+				COMPARE		Loc_Y,	76
+				JUMP		NZ,		add_location_Y
+				JUMP		halt_movement
+add_location_Y:	ADD			Loc_Y,	01					;	X = X. Y = Y + 1
+				RETURN
+check_west_direction:COMPARE		s1,	OR_W
+				JUMP		NZ,		return_now
+				COMPARE		Loc_X,	01
+				JUMP		NZ,		subtract_location_X
+				JUMP		halt_movement
+subtract_location_X:SUB		Loc_X,	01					;	X = X - 1. Y = Y
+return_now:		RETURN
+
+; =================================================
+; ==  display_seven_segment() 	===================
+; =================================================
+
+display_seven_segment:LOAD	s1,		Loc_X				; 
+				AND			s1,		MSK_LOWER_NIBBLE	;	
+				OUTPUT		s1,		PA_DIG6				;	Display lower nibble of X Co-ordinate on Dig2 
+				LOAD		s1,		Loc_X
+				AND			s1,		MSK_HIGHER_NIBBLE
+				SR0			s1
+				SR0			s1
+				SR0			s1
+				SR0			s1
+				OUTPUT		s1,		PA_DIG7				; 	Display higher nibble of X Co-ordinate on Dig3 
+				LOAD		s1,		Loc_Y				; 
+				AND			s1,		MSK_LOWER_NIBBLE	;	
+				OUTPUT		s1,		PA_DIG4				;	Display lower nibble of Y Co-ordinate on Dig0 
+				LOAD		s1,		Loc_Y
+				AND			s1,		MSK_HIGHER_NIBBLE
+				SR0			s1
+				SR0			s1
+				SR0			s1
+				SR0			s1
+				OUTPUT		s1,		PA_DIG5				; 	Display higher nibble of Y Co-ordinate on Dig1
+				LOAD		s1,		Orientation
+				;AND 		s1,		MSK_LOWER_NIBBLE
+				OUTPUT		s1,		PA_LEDS1508			; 	Output the value of Present ORIENTATION
+				RETURN
+				
+
+; =========================
+; === Interrupt Handler ===
+; =========================
+ADDRESS 300
+isr:			FETCH		s5,		SP_SEM				; 	fetch the semaphore
+				TEST		s5,		FF					;	if (SP_SEM == 0) {  // update system register values
+				JUMP		NZ,		isr_L0				; -- ZF == 0 says semaphore != 0
+				ADD			s5,		01					;		increment semaphore
+				STORE		s5,		SP_SEM				;	}  // update system register values
+isr_L0:			XOR			DP_UPPER,01					;	toggle  decimal point 0 (rightmost)
+				OUTPUT		DP_UPPER,PA_DP0704			;	write directly to decpt port to avoid having to save s1		
+				RETURNI		ENABLE						;	and return from interrupt			
+
+; ========================
+; === Interrupt vector ===
+; ========================
+ADDRESS 3FF
+intvect:		JUMP	isr							; jump to interrupt service routine
+					
+				
+
+
+
+
+								
